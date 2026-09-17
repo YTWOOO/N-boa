@@ -1,0 +1,16 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    match /notes/{noteId} {
+      // Só o dono autenticado pode ler, atualizar ou excluir a nota
+      allow read, update, delete: if request.auth != null
+                                   && request.auth.uid == resource.data.uid;
+
+      // Ao criar, o uid enviado precisa ser o do usuário autenticado
+      allow create: if request.auth != null
+                    && request.auth.uid == request.resource.data.uid;
+    }
+  }
+}

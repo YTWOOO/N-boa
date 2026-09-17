@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>Nódoa — notas conectadas</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><circle cx=%2230%22 cy=%2230%22 r=%2210%22 fill=%22%235ec8b8%22/><circle cx=%2270%22 cy=%2235%22 r=%228%22 fill=%22%235ec8b8%22/><circle cx=%2245%22 cy=%2270%22 r=%229%22 fill=%22%235ec8b8%22/><line x1=%2230%22 y1=%2230%22 x2=%2270%22 y2=%2235%22 stroke=%22%235ec8b8%22 stroke-width=%223%22/><line x1=%2230%22 y1=%2230%22 x2=%2245%22 y2=%2270%22 stroke=%22%235ec8b8%22 stroke-width=%223%22/></svg>">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ===================== TELA DE LOGIN ===================== -->
+<div id="auth-screen" class="auth-screen">
+  <div class="auth-card">
+    <div class="auth-brand">
+      <svg width="34" height="34" viewBox="0 0 100 100"><circle cx="30" cy="30" r="10" fill="var(--accent)"/><circle cx="70" cy="35" r="8" fill="var(--accent)"/><circle cx="45" cy="70" r="9" fill="var(--accent)"/><line x1="30" y1="30" x2="70" y2="35" stroke="var(--accent)" stroke-width="3"/><line x1="30" y1="30" x2="45" y2="70" stroke="var(--accent)" stroke-width="3"/></svg>
+      <span class="auth-brand-name">Nódoa</span>
+    </div>
+    <p class="auth-tagline">Suas notas, conectadas entre aparelhos.</p>
+
+    <form id="auth-form">
+      <label class="field">
+        <span>E-mail</span>
+        <input type="email" id="auth-email" autocomplete="email" required>
+      </label>
+      <label class="field">
+        <span>Senha</span>
+        <input type="password" id="auth-password" autocomplete="current-password" required minlength="6">
+      </label>
+      <p id="auth-error" class="auth-error" hidden></p>
+      <button type="submit" id="auth-submit" class="btn btn-primary btn-block">Entrar</button>
+    </form>
+    <button id="auth-toggle" class="link-btn">Ainda não tem conta? Criar conta</button>
+  </div>
+</div>
+
+<!-- ===================== APP PRINCIPAL ===================== -->
+<div id="app" class="app" hidden>
+
+  <!-- Sidebar -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-top">
+      <div class="brand">
+        <svg width="20" height="20" viewBox="0 0 100 100"><circle cx="30" cy="30" r="10" fill="var(--accent)"/><circle cx="70" cy="35" r="8" fill="var(--accent)"/><circle cx="45" cy="70" r="9" fill="var(--accent)"/><line x1="30" y1="30" x2="70" y2="35" stroke="var(--accent)" stroke-width="3"/><line x1="30" y1="30" x2="45" y2="70" stroke="var(--accent)" stroke-width="3"/></svg>
+        <span>Nódoa</span>
+      </div>
+      <button id="logout-btn" class="icon-btn" title="Sair">⏻</button>
+    </div>
+
+    <div class="search-box">
+      <input type="text" id="search-input" placeholder="Buscar notas…">
+    </div>
+
+    <button id="new-note-btn" class="btn btn-accent btn-block">+ Nova nota</button>
+
+    <div class="sidebar-section">
+      <div class="sidebar-section-title">Pastas</div>
+      <div id="folder-tree" class="folder-tree"></div>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="sidebar-section-title">Tags</div>
+      <div id="tag-list" class="tag-list"></div>
+    </div>
+
+    <div class="sidebar-section sidebar-notes">
+      <div class="sidebar-section-title" id="notes-list-title">Todas as notas</div>
+      <div id="notes-list" class="notes-list"></div>
+    </div>
+  </aside>
+
+  <!-- Área principal -->
+  <main class="main">
+    <div class="topbar">
+      <button id="sidebar-toggle" class="icon-btn mobile-only" title="Notas">☰</button>
+      <input type="text" id="note-title-input" class="note-title-input" placeholder="Título da nota">
+      <div class="topbar-actions">
+        <button id="view-editor-btn" class="tab-btn is-active" data-view="split">Editor</button>
+        <button id="view-graph-btn" class="tab-btn" data-view="graph">Grafo</button>
+        <button id="delete-note-btn" class="icon-btn" title="Excluir nota">🗑</button>
+      </div>
+    </div>
+
+    <div class="note-meta">
+      <input type="text" id="note-folder-input" class="meta-input" placeholder="Pasta (ex: Cálculo II/Provas)">
+      <input type="text" id="note-tags-input" class="meta-input" placeholder="tags separadas, por vírgula">
+    </div>
+
+    <!-- Split editor/preview -->
+    <div id="split-view" class="split-view">
+      <textarea id="editor" class="editor" placeholder="Escreva em Markdown… use [[Nome da Nota]] para linkar."></textarea>
+      <div id="preview" class="preview"></div>
+    </div>
+
+    <!-- Graph view -->
+    <div id="graph-view" class="graph-view" hidden>
+      <svg id="graph-svg"></svg>
+      <div class="graph-hint">Arraste para mover • role para zoom • clique num nó para abrir</div>
+    </div>
+
+    <div id="backlinks" class="backlinks"></div>
+
+    <div id="empty-state" class="empty-state">
+      <p>Selecione uma nota à esquerda ou crie uma nova.</p>
+    </div>
+  </main>
+</div>
+
+<script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore-compat.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/11.1.1/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
