@@ -1,5 +1,5 @@
 // ============================================================
-// CONFIGURAÇÃO DO FIREBASE — troque se for usar outro projeto
+// CONFIGURAÇÃO DO FIREBASE
 // ============================================================
 const firebaseConfig = {
   apiKey: "AIzaSyC9a4LaHstX5mfR7ojbJR6-efaQSOrgATM",
@@ -14,6 +14,7 @@ const firebaseConfig = {
 firebase.initializeApp(firebaseConfig);
 const auth = firebase.auth();
 const db = firebase.firestore();
+const storage = firebase.storage();
 
 // ============================================================
 // ESTADO GLOBAL
@@ -25,7 +26,7 @@ const state = {
   filterFolder: null,
   filterTag: null,
   searchQuery: "",
-  view: "split",       // "split" | "graph"
+  view: "editor",      // "editor" | "graph"
   unsubscribeNotes: null,
 };
 
@@ -59,13 +60,13 @@ const el = {
   viewEditorBtn: document.getElementById("view-editor-btn"),
   viewGraphBtn: document.getElementById("view-graph-btn"),
 
-  splitView: document.getElementById("split-view"),
+  editorView: document.getElementById("editor-view"),
+  editorContainer: document.getElementById("editor-container"),
   graphView: document.getElementById("graph-view"),
   graphSvg: document.getElementById("graph-svg"),
-  editor: document.getElementById("editor"),
-  preview: document.getElementById("preview"),
   backlinks: document.getElementById("backlinks"),
   emptyState: document.getElementById("empty-state"),
+  imageInput: document.getElementById("image-input"),
 };
 
 let isRegisterMode = false;
@@ -76,9 +77,7 @@ let isRegisterMode = false;
 el.authToggle.addEventListener("click", () => {
   isRegisterMode = !isRegisterMode;
   el.authSubmit.textContent = isRegisterMode ? "Criar conta" : "Entrar";
-  el.authToggle.textContent = isRegisterMode
-    ? "Já tem conta? Entrar"
-    : "Ainda não tem conta? Criar conta";
+  el.authToggle.textContent = isRegisterMode ? "Já tem conta? Entrar" : "Ainda não tem conta? Criar conta";
   el.authError.hidden = true;
 });
 
@@ -95,6 +94,7 @@ el.authForm.addEventListener("submit", async (e) => {
       await auth.signInWithEmailAndPassword(email, password);
     }
   } catch (err) {
+    console.error("Erro de autenticação:", err.code, err.message);
     el.authError.textContent = traduzErroAuth(err.code);
     el.authError.hidden = false;
   } finally {
@@ -112,6 +112,8 @@ function traduzErroAuth(code) {
     "auth/email-already-in-use": "Esse e-mail já tem uma conta.",
     "auth/weak-password": "Senha muito fraca (mínimo 6 caracteres).",
     "auth/invalid-credential": "E-mail ou senha incorretos.",
+    "auth/operation-not-allowed": "Login por e-mail/senha não está ativado no Firebase. Ative em Authentication → Sign-in method.",
+    "auth/network-request-failed": "Falha de conexão. Verifique sua internet.",
   };
   return map[code] || "Algo deu errado. Tente novamente.";
 }
@@ -132,6 +134,101 @@ auth.onAuthStateChanged((user) => {
 });
 
 // ============================================================
+// UTILITÁRIOS
+// ============================================================
+function escapeHtml(str) {
+  return String(str).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
+function stripHtml(html) {
+  const div = document.createElement("div");
+  div.innerHTML = html || "";
+  return div.textContent || "";
+}
+
+function debounce(fn, delay) {
+  let t;
+  return (...args) => {
+    clearTimeout(t);
+    t = setTimeout(() => fn(...args), delay);
+  };
+}
+
+function findNoteByTitle(title) {
+  const norm = (title || "").trim().toLowerCase();
+  return Object.values(state.notes).find((n) => (n.title || "").trim().toLowerCase() === norm);
+}
+
+// ============================================================
+// QUILL — editor de texto rico
+// ============================================================
+const Font = Quill.import("formats/font");
+Font.whitelist = ["sans", "serif", "mono"];
+Quill.register(Font, true);
+
+const Embed = Quill.import("blots/embed");
+class MentionBlot extends Embed {
+  static create(data) {
+    const node = super.create();
+    node.setAttribute("data-title", data.title);
+    node.setAttribute("data-id", data.id || "");
+    node.classList.add("mention");
+    node.innerText = "@" + data.title;
+    return node;
+  }
+  static value(node) {
+    return { title: node.getAttribute("data-title"), id: node.getAttribute("data-id") };
+  }
+}
+MentionBlot.blotName = "mention";
+MentionBlot.tagName = "span";
+Quill.register(MentionBlot);
+
+const quill = new Quill(el.editorContainer, {
+  theme: "snow",
+  placeholder: "Escreva aqui… digite @ para linkar outra nota.",
+  modules: {
+    toolbar: [
+      [{ header: [1, 2, 3, false] }],
+      [{ font: Font.whitelist }],
+      ["bold", "italic", "underline"],
+      [{ color: [] }],
+      [{ align: [] }],
+      ["image"],
+      ["clean"],
+    ],
+  },
+});
+
+quill.container.style.position = "relative";
+
+quill.getModule("toolbar").addHandler("image", () => el.imageInput.click());
+
+el.imageInput.addEventListener("change", async () => {
+  const file = el.imageInput.files[0];
+  el.imageInput.value = "";
+  if (!file || !state.currentNoteId) return;
+  const range = quill.getSelection(true) || { index: quill.getLength() };
+  const placeholderText = "Enviando imagem…";
+  quill.insertText(range.index, placeholderText, "italic", true, "user");
+  try {
+    const path = `images/${state.user.uid}/${Date.now()}_${file.name}`;
+    const ref = storage.ref(path);
+    const snap = await ref.put(file);
+    const url = await snap.ref.getDownloadURL();
+    quill.deleteText(range.index, placeholderText.length, "user");
+    quill.insertEmbed(range.index, "image", url, "user");
+    quill.setSelection(range.index + 1, 0, "user");
+  } catch (err) {
+    console.error("Erro ao enviar imagem:", err);
+    quill.deleteText(range.index, placeholderText.length, "user");
+    alert("Não foi possível enviar a imagem. Confira se o Storage está ativado no Firebase.");
+  }
+});
+
+// ============================================================
 // FIRESTORE — SINCRONIZAÇÃO EM TEMPO REAL
 // ============================================================
 function listenToNotes(uid) {
@@ -142,17 +239,10 @@ function listenToNotes(uid) {
     .onSnapshot(
       (snapshot) => {
         state.notes = {};
-        snapshot.forEach((doc) => {
-          state.notes[doc.id] = { id: doc.id, ...doc.data() };
-        });
+        snapshot.forEach((doc) => (state.notes[doc.id] = { id: doc.id, ...doc.data() }));
         renderSidebar();
         if (state.currentNoteId && state.notes[state.currentNoteId]) {
           renderBacklinks();
-          if (document.activeElement !== el.editor) {
-            const n = state.notes[state.currentNoteId];
-            if (el.editor.value !== (n.content || "")) el.editor.value = n.content || "";
-            renderPreview(n.content || "");
-          }
         } else if (state.currentNoteId && !state.notes[state.currentNoteId]) {
           openNote(null);
         }
@@ -183,10 +273,7 @@ function saveCurrentNote(fields) {
   if (!state.currentNoteId) return;
   db.collection("notes")
     .doc(state.currentNoteId)
-    .set(
-      { ...fields, updatedAt: firebase.firestore.FieldValue.serverTimestamp() },
-      { merge: true }
-    );
+    .set({ ...fields, updatedAt: firebase.firestore.FieldValue.serverTimestamp() }, { merge: true });
 }
 
 function deleteNote(id) {
@@ -196,112 +283,187 @@ function deleteNote(id) {
 }
 
 // ============================================================
-// WIKILINKS + MARKDOWN
+// AUTOSAVE DO CONTEÚDO + EXTRAÇÃO DE MENÇÕES
 // ============================================================
-const WIKILINK_RE = /\[\[([^\]]+)\]\]/g;
-
-function parseWikilinkTitles(content) {
-  const titles = new Set();
-  let m;
-  const re = new RegExp(WIKILINK_RE);
-  while ((m = re.exec(content)) !== null) {
-    const raw = m[1].split("|")[0].trim();
-    if (raw) titles.add(raw);
-  }
-  return Array.from(titles);
-}
-
-function findNoteByTitle(title) {
-  const norm = title.trim().toLowerCase();
-  return Object.values(state.notes).find(
-    (n) => (n.title || "").trim().toLowerCase() === norm
+const debouncedSaveContent = debounce(() => {
+  const content = quill.root.innerHTML;
+  const links = Array.from(quill.root.querySelectorAll("span.mention")).map((n) =>
+    n.getAttribute("data-title")
   );
-}
-
-function renderPreview(content) {
-  marked.setOptions({ breaks: true, gfm: true });
-  let html = marked.parse(content || "");
-  html = html.replace(WIKILINK_RE, (full, inner) => {
-    const [rawTitle, alias] = inner.split("|");
-    const title = rawTitle.trim();
-    const label = (alias || rawTitle).trim();
-    const exists = !!findNoteByTitle(title);
-    const cls = exists ? "wikilink" : "wikilink is-new";
-    return `<a class="${cls}" data-title="${escapeAttr(title)}">${escapeHtml(label)}</a>`;
-  });
-  el.preview.innerHTML = html;
-}
-
-function escapeHtml(str) {
-  return str.replace(/[&<>"']/g, (c) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-  }[c]));
-}
-function escapeAttr(str) { return escapeHtml(str); }
-
-el.preview.addEventListener("click", (e) => {
-  const link = e.target.closest("a.wikilink");
-  if (!link) return;
-  e.preventDefault();
-  const title = link.dataset.title;
-  const existing = findNoteByTitle(title);
-  if (existing) {
-    openNote(existing.id);
-  } else {
-    const id = createNoteDoc({ title, content: "" });
-    openNote(id);
-  }
-});
-
-// ============================================================
-// EDITOR — autosave com debounce
-// ============================================================
-function debounce(fn, delay) {
-  let t;
-  return (...args) => {
-    clearTimeout(t);
-    t = setTimeout(() => fn(...args), delay);
-  };
-}
-
-const debouncedSaveContent = debounce((content) => {
-  const links = parseWikilinkTitles(content);
-  saveCurrentNote({ content, links });
+  const uniqueLinks = Array.from(new Set(links));
+  saveCurrentNote({ content, links: uniqueLinks });
 }, 500);
 
-el.editor.addEventListener("input", () => {
-  const content = el.editor.value;
-  renderPreview(content);
-  debouncedSaveContent(content);
+quill.on("text-change", (delta, oldDelta, source) => {
+  if (source !== "user") return;
+  debouncedSaveContent();
+  handleMentionDetection();
 });
 
-const debouncedSaveTitle = debounce((title) => {
-  saveCurrentNote({ title: title || "Nota sem título" });
-}, 500);
-el.noteTitleInput.addEventListener("input", () => {
-  debouncedSaveTitle(el.noteTitleInput.value);
+quill.on("selection-change", (range, oldRange, source) => {
+  if (!mentionState) return;
+  if (!range || range.index < mentionState.startIndex) closeMention();
 });
+
+const debouncedSaveTitle = debounce((title) => saveCurrentNote({ title: title || "Nota sem título" }), 500);
+el.noteTitleInput.addEventListener("input", () => debouncedSaveTitle(el.noteTitleInput.value));
 
 const debouncedSaveFolder = debounce((folder) => saveCurrentNote({ folder }), 500);
-el.noteFolderInput.addEventListener("input", () => {
-  debouncedSaveFolder(el.noteFolderInput.value.trim());
-});
+el.noteFolderInput.addEventListener("input", () => debouncedSaveFolder(el.noteFolderInput.value.trim()));
 
 const debouncedSaveTags = debounce((tagsStr) => {
   const tags = tagsStr.split(",").map((t) => t.trim()).filter(Boolean);
   saveCurrentNote({ tags });
 }, 500);
-el.noteTagsInput.addEventListener("input", () => {
-  debouncedSaveTags(el.noteTagsInput.value);
-});
+el.noteTagsInput.addEventListener("input", () => debouncedSaveTags(el.noteTagsInput.value));
 
 el.deleteNoteBtn.addEventListener("click", () => {
   if (state.currentNoteId) deleteNote(state.currentNoteId);
 });
 
-el.newNoteBtn.addEventListener("click", () => {
-  const id = createNoteDoc({});
-  openNote(id);
+el.newNoteBtn.addEventListener("click", () => openNote(createNoteDoc({})));
+
+// ============================================================
+// MENÇÕES (@) COM AUTOCOMPLETE
+// ============================================================
+let mentionState = null; // { startIndex }
+let mentionSuggestions = [];
+let mentionActiveIndex = 0;
+
+const mentionDropdown = document.createElement("div");
+mentionDropdown.className = "mention-dropdown";
+mentionDropdown.hidden = true;
+quill.container.appendChild(mentionDropdown);
+
+function handleMentionDetection() {
+  const sel = quill.getSelection();
+  if (!sel) return;
+
+  if (mentionState) {
+    if (sel.index <= mentionState.startIndex) { closeMention(); return; }
+    const query = quill.getText(mentionState.startIndex + 1, sel.index - (mentionState.startIndex + 1));
+    if (query.includes("\n")) { closeMention(); return; }
+    updateMentionSuggestions(query);
+    positionMentionDropdown(sel.index);
+    return;
+  }
+
+  if (sel.length > 0) return;
+  const charBefore = sel.index > 0 ? quill.getText(sel.index - 1, 1) : "";
+  if (charBefore !== "@") return;
+  const charBefore2 = sel.index > 1 ? quill.getText(sel.index - 2, 1) : "\n";
+  if (!/[\s\n]/.test(charBefore2) && sel.index !== 1) return;
+
+  mentionState = { startIndex: sel.index - 1 };
+  updateMentionSuggestions("");
+  positionMentionDropdown(sel.index);
+}
+
+function updateMentionSuggestions(query) {
+  const q = query.trim().toLowerCase();
+  const notes = Object.values(state.notes)
+    .filter((n) => !q || (n.title || "").toLowerCase().includes(q))
+    .sort((a, b) => (b.updatedAt?.seconds || 0) - (a.updatedAt?.seconds || 0))
+    .slice(0, 8)
+    .map((n) => ({ id: n.id, title: n.title || "sem título", isCreate: false }));
+
+  const exact = q && findNoteByTitle(query.trim());
+  if (query.trim() && !exact) {
+    notes.push({ title: query.trim(), isCreate: true });
+  }
+
+  mentionSuggestions = notes;
+  mentionActiveIndex = 0;
+  renderMentionDropdown();
+}
+
+function renderMentionDropdown() {
+  if (mentionSuggestions.length === 0) {
+    mentionDropdown.hidden = true;
+    return;
+  }
+  mentionDropdown.innerHTML = mentionSuggestions
+    .map(
+      (s, i) => `
+      <div class="mention-item ${i === mentionActiveIndex ? "is-active" : ""} ${s.isCreate ? "is-create" : ""}" data-idx="${i}">
+        ${s.isCreate ? `Criar nota "${escapeHtml(s.title)}"` : escapeHtml(s.title)}
+      </div>`
+    )
+    .join("");
+  mentionDropdown.hidden = false;
+  mentionDropdown.querySelectorAll(".mention-item").forEach((item) => {
+    item.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      selectMentionSuggestion(Number(item.dataset.idx));
+    });
+  });
+}
+
+function positionMentionDropdown(index) {
+  const bounds = quill.getBounds(index);
+  mentionDropdown.style.left = bounds.left + "px";
+  mentionDropdown.style.top = bounds.bottom + 6 + "px";
+}
+
+function closeMention() {
+  mentionState = null;
+  mentionSuggestions = [];
+  mentionDropdown.hidden = true;
+}
+
+function selectMentionSuggestion(idx) {
+  const item = mentionSuggestions[idx];
+  if (!item || !mentionState) return;
+  const sel = quill.getSelection();
+  const { startIndex } = mentionState;
+  const queryLength = sel ? sel.index - (startIndex + 1) : 0;
+
+  let title = item.title;
+  let id = item.id;
+  if (item.isCreate) id = createNoteDoc({ title });
+
+  quill.deleteText(startIndex, queryLength + 1, "user");
+  quill.insertEmbed(startIndex, "mention", { title, id }, "user");
+  quill.insertText(startIndex + 1, " ", "user");
+  quill.setSelection(startIndex + 2, 0, "user");
+  closeMention();
+}
+
+quill.root.addEventListener(
+  "keydown",
+  (e) => {
+    if (!mentionState) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      e.stopPropagation();
+      mentionActiveIndex = (mentionActiveIndex + 1) % mentionSuggestions.length;
+      renderMentionDropdown();
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      e.stopPropagation();
+      mentionActiveIndex = (mentionActiveIndex - 1 + mentionSuggestions.length) % mentionSuggestions.length;
+      renderMentionDropdown();
+    } else if (e.key === "Enter" || e.key === "Tab") {
+      e.preventDefault();
+      e.stopPropagation();
+      selectMentionSuggestion(mentionActiveIndex);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      closeMention();
+    }
+  },
+  true
+);
+
+// Clique numa menção abre a nota linkada
+quill.root.addEventListener("mousedown", (e) => {
+  const mention = e.target.closest("span.mention");
+  if (!mention) return;
+  e.preventDefault();
+  const title = mention.getAttribute("data-title");
+  const existing = findNoteByTitle(title);
+  if (existing) openNote(existing.id);
 });
 
 // ============================================================
@@ -310,26 +472,30 @@ el.newNoteBtn.addEventListener("click", () => {
 function openNote(id) {
   state.currentNoteId = id;
   const note = id ? state.notes[id] : null;
+  closeMention();
 
   if (!note) {
     el.emptyState.hidden = false;
-    el.splitView.hidden = true;
+    el.editorView.hidden = true;
     el.graphView.hidden = true;
     el.noteTitleInput.value = "";
     el.noteFolderInput.value = "";
     el.noteTagsInput.value = "";
     el.backlinks.classList.remove("has-links");
+    quill.setText("");
     renderSidebar();
     return;
   }
 
   el.emptyState.hidden = true;
-  setView("split");
+  setView("editor");
   el.noteTitleInput.value = note.title || "";
   el.noteFolderInput.value = note.folder || "";
   el.noteTagsInput.value = (note.tags || []).join(", ");
-  el.editor.value = note.content || "";
-  renderPreview(note.content || "");
+
+  quill.setText("", "silent");
+  if (note.content) quill.clipboard.dangerouslyPasteHTML(note.content, "silent");
+
   renderBacklinks();
   renderSidebar();
 
@@ -341,7 +507,7 @@ function renderBacklinks() {
   if (!note) return;
   const title = (note.title || "").trim().toLowerCase();
   const linkers = Object.values(state.notes).filter(
-    (n) => n.id !== note.id && (n.links || []).some((l) => l.trim().toLowerCase() === title)
+    (n) => n.id !== note.id && (n.links || []).some((l) => (l || "").trim().toLowerCase() === title)
   );
   if (linkers.length === 0) {
     el.backlinks.classList.remove("has-links");
@@ -351,9 +517,7 @@ function renderBacklinks() {
   el.backlinks.classList.add("has-links");
   el.backlinks.innerHTML =
     `<div class="backlinks-title">Notas que linkam para cá</div>` +
-    linkers
-      .map((n) => `<span class="backlink-chip" data-id="${n.id}">${escapeHtml(n.title || "sem título")}</span>`)
-      .join("");
+    linkers.map((n) => `<span class="backlink-chip" data-id="${n.id}">${escapeHtml(n.title || "sem título")}</span>`).join("");
   el.backlinks.querySelectorAll(".backlink-chip").forEach((chip) => {
     chip.addEventListener("click", () => openNote(chip.dataset.id));
   });
@@ -381,48 +545,31 @@ function setTagFilter(tag) {
 function renderSidebar() {
   const notes = Object.values(state.notes);
 
-  // Pastas
   const folders = Array.from(new Set(notes.map((n) => n.folder).filter(Boolean))).sort();
-  el.folderTree.innerHTML = folders
-    .map(
-      (f) =>
-        `<button class="folder-item ${state.filterFolder === f ? "is-active" : ""}" data-folder="${escapeAttr(f)}">${escapeHtml(f)}</button>`
-    )
-    .join("") || `<div class="note-item-meta">Nenhuma pasta ainda</div>`;
-  el.folderTree.querySelectorAll(".folder-item").forEach((btn) => {
-    btn.addEventListener("click", () => setFolderFilter(btn.dataset.folder));
-  });
+  el.folderTree.innerHTML =
+    folders
+      .map((f) => `<button class="folder-item ${state.filterFolder === f ? "is-active" : ""}" data-folder="${escapeHtml(f)}">${escapeHtml(f)}</button>`)
+      .join("") || `<div class="note-item-meta">Nenhuma pasta ainda</div>`;
+  el.folderTree.querySelectorAll(".folder-item").forEach((btn) => btn.addEventListener("click", () => setFolderFilter(btn.dataset.folder)));
 
-  // Tags
   const tags = Array.from(new Set(notes.flatMap((n) => n.tags || []))).sort();
-  el.tagList.innerHTML = tags
-    .map(
-      (t) =>
-        `<button class="tag-item ${state.filterTag === t ? "is-active" : ""}" data-tag="${escapeAttr(t)}">${escapeHtml(t)}</button>`
-    )
-    .join("") || `<div class="note-item-meta">Nenhuma tag ainda</div>`;
-  el.tagList.querySelectorAll(".tag-item").forEach((btn) => {
-    btn.addEventListener("click", () => setTagFilter(btn.dataset.tag));
-  });
+  el.tagList.innerHTML =
+    tags
+      .map((t) => `<button class="tag-item ${state.filterTag === t ? "is-active" : ""}" data-tag="${escapeHtml(t)}">${escapeHtml(t)}</button>`)
+      .join("") || `<div class="note-item-meta">Nenhuma tag ainda</div>`;
+  el.tagList.querySelectorAll(".tag-item").forEach((btn) => btn.addEventListener("click", () => setTagFilter(btn.dataset.tag)));
 
-  // Lista de notas (filtrada)
   let filtered = notes;
   if (state.filterFolder) filtered = filtered.filter((n) => n.folder === state.filterFolder);
   if (state.filterTag) filtered = filtered.filter((n) => (n.tags || []).includes(state.filterTag));
   if (state.searchQuery) {
     filtered = filtered.filter(
-      (n) =>
-        (n.title || "").toLowerCase().includes(state.searchQuery) ||
-        (n.content || "").toLowerCase().includes(state.searchQuery)
+      (n) => (n.title || "").toLowerCase().includes(state.searchQuery) || stripHtml(n.content).toLowerCase().includes(state.searchQuery)
     );
   }
   filtered.sort((a, b) => (b.updatedAt?.seconds || 0) - (a.updatedAt?.seconds || 0));
 
-  el.notesListTitle.textContent = state.filterFolder
-    ? `Pasta: ${state.filterFolder}`
-    : state.filterTag
-    ? `Tag: ${state.filterTag}`
-    : "Todas as notas";
+  el.notesListTitle.textContent = state.filterFolder ? `Pasta: ${state.filterFolder}` : state.filterTag ? `Tag: ${state.filterTag}` : "Todas as notas";
 
   el.notesList.innerHTML =
     filtered
@@ -430,14 +577,12 @@ function renderSidebar() {
         (n) => `
       <div class="note-item ${state.currentNoteId === n.id ? "is-active" : ""}" data-id="${n.id}">
         <div class="note-item-title">${escapeHtml(n.title || "sem título")}</div>
-        <div class="note-item-meta">${escapeHtml((n.content || "").slice(0, 60))}</div>
+        <div class="note-item-meta">${escapeHtml(stripHtml(n.content).slice(0, 60))}</div>
       </div>`
       )
       .join("") || `<div class="note-item-meta" style="padding:8px;">Nenhuma nota encontrada.</div>`;
 
-  el.notesList.querySelectorAll(".note-item").forEach((item) => {
-    item.addEventListener("click", () => openNote(item.dataset.id));
-  });
+  el.notesList.querySelectorAll(".note-item").forEach((item) => item.addEventListener("click", () => openNote(item.dataset.id)));
 }
 
 // ============================================================
@@ -445,18 +590,15 @@ function renderSidebar() {
 // ============================================================
 function setView(view) {
   state.view = view;
-  el.splitView.hidden = view !== "split";
+  el.editorView.hidden = view !== "editor";
   el.graphView.hidden = view !== "graph";
-  el.viewEditorBtn.classList.toggle("is-active", view === "split");
+  el.viewEditorBtn.classList.toggle("is-active", view === "editor");
   el.viewGraphBtn.classList.toggle("is-active", view === "graph");
   if (view === "graph") renderGraph();
 }
-el.viewEditorBtn.addEventListener("click", () => setView("split"));
+el.viewEditorBtn.addEventListener("click", () => setView("editor"));
 el.viewGraphBtn.addEventListener("click", () => setView("graph"));
-
-el.sidebarToggle.addEventListener("click", () => {
-  el.sidebar.classList.toggle("is-open");
-});
+el.sidebarToggle.addEventListener("click", () => el.sidebar.classList.toggle("is-open"));
 
 // ============================================================
 // GRAFO DE CONEXÕES (d3-force)
@@ -475,10 +617,8 @@ function renderGraph() {
   const links = [];
   notes.forEach((n) => {
     (n.links || []).forEach((linkedTitle) => {
-      const targetId = nodeByTitle[linkedTitle.trim().toLowerCase()];
-      if (targetId && targetId !== n.id) {
-        links.push({ source: n.id, target: targetId });
-      }
+      const targetId = nodeByTitle[(linkedTitle || "").trim().toLowerCase()];
+      if (targetId && targetId !== n.id) links.push({ source: n.id, target: targetId });
     });
   });
 
@@ -487,19 +627,9 @@ function renderGraph() {
   svg.attr("viewBox", [0, 0, width, height]);
 
   const container = svg.append("g");
+  svg.call(d3.zoom().scaleExtent([0.3, 3]).on("zoom", (event) => container.attr("transform", event.transform)));
 
-  svg.call(
-    d3.zoom().scaleExtent([0.3, 3]).on("zoom", (event) => {
-      container.attr("transform", event.transform);
-    })
-  );
-
-  const linkSel = container
-    .append("g")
-    .selectAll("line")
-    .data(links)
-    .join("line")
-    .attr("class", "graph-link");
+  const linkSel = container.append("g").selectAll("line").data(links).join("line").attr("class", "graph-link");
 
   const nodeSel = container
     .append("g")
@@ -509,27 +639,14 @@ function renderGraph() {
     .attr("class", "graph-node")
     .call(
       d3.drag()
-        .on("start", (event, d) => {
-          if (!event.active) graphSimulation.alphaTarget(0.3).restart();
-          d.fx = d.x; d.fy = d.y;
-        })
+        .on("start", (event, d) => { if (!event.active) graphSimulation.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
         .on("drag", (event, d) => { d.fx = event.x; d.fy = event.y; })
-        .on("end", (event, d) => {
-          if (!event.active) graphSimulation.alphaTarget(0);
-          d.fx = null; d.fy = null;
-        })
+        .on("end", (event, d) => { if (!event.active) graphSimulation.alphaTarget(0); d.fx = null; d.fy = null; })
     )
-    .on("click", (event, d) => {
-      setView("split");
-      openNote(d.id);
-    });
+    .on("click", (event, d) => { setView("editor"); openNote(d.id); });
 
   nodeSel.append("circle").attr("r", 8);
-  nodeSel
-    .append("text")
-    .attr("x", 12)
-    .attr("y", 4)
-    .text((d) => d.title);
+  nodeSel.append("text").attr("x", 12).attr("y", 4).text((d) => d.title);
 
   graphSimulation = d3
     .forceSimulation(nodes)
@@ -538,18 +655,12 @@ function renderGraph() {
     .force("center", d3.forceCenter(width / 2, height / 2))
     .force("collide", d3.forceCollide(40))
     .on("tick", () => {
-      linkSel
-        .attr("x1", (d) => d.source.x)
-        .attr("y1", (d) => d.source.y)
-        .attr("x2", (d) => d.target.x)
-        .attr("y2", (d) => d.target.y);
+      linkSel.attr("x1", (d) => d.source.x).attr("y1", (d) => d.source.y).attr("x2", (d) => d.target.x).attr("y2", (d) => d.target.y);
       nodeSel.attr("transform", (d) => `translate(${d.x},${d.y})`);
     });
 }
 
-window.addEventListener("resize", () => {
-  if (state.view === "graph") renderGraph();
-});
+window.addEventListener("resize", () => { if (state.view === "graph") renderGraph(); });
 
 // Estado inicial: nada selecionado
 openNote(null);
