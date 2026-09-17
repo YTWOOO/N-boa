@@ -14,7 +14,10 @@ const firebaseConfig = {
 firebase.initializeApp(firebaseConfig);
 const auth = firebase.auth();
 const db = firebase.firestore();
-const storage = firebase.storage();
+
+// Cloudinary — upload de imagens (plano gratuito, sem precisar do Firebase Storage)
+const CLOUDINARY_CLOUD_NAME = "tgqp7plo";
+const CLOUDINARY_UPLOAD_PRESET = "Mirror";
 
 // ============================================================
 // ESTADO GLOBAL
@@ -186,6 +189,10 @@ MentionBlot.blotName = "mention";
 MentionBlot.tagName = "span";
 Quill.register(MentionBlot);
 
+const SizeStyle = Quill.import("attributors/style/size");
+SizeStyle.whitelist = ["12px", "14px", "16px", "18px", "20px", "24px", "32px"];
+Quill.register(SizeStyle, true);
+
 const quill = new Quill(el.editorContainer, {
   theme: "snow",
   placeholder: "Escreva aqui… digite @ para linkar outra nota.",
@@ -193,9 +200,13 @@ const quill = new Quill(el.editorContainer, {
     toolbar: [
       [{ header: [1, 2, 3, false] }],
       [{ font: Font.whitelist }],
+      [{ size: SizeStyle.whitelist }],
       ["bold", "italic", "underline"],
-      [{ color: [] }],
+      [{ color: [] }, { background: [] }],
+      ["link"],
       [{ align: [] }],
+      [{ list: "ordered" }, { list: "bullet" }],
+      [{ indent: "-1" }, { indent: "+1" }],
       ["image"],
       ["clean"],
     ],
@@ -206,27 +217,144 @@ quill.container.style.position = "relative";
 
 quill.getModule("toolbar").addHandler("image", () => el.imageInput.click());
 
+async function uploadAndInsertImage(file, index) {
+  if (!file || !file.type.startsWith("image/") || !state.currentNoteId) return;
+  const placeholderText = "Enviando imagem…";
+  quill.insertText(index, placeholderText, "italic", true, "user");
+  try {
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("upload_preset", CLOUDINARY_UPLOAD_PRESET);
+    const res = await fetch(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`, {
+      method: "POST",
+      body: formData,
+    });
+    if (!res.ok) throw new Error("Upload falhou: " + res.status);
+    const data = await res.json();
+    quill.deleteText(index, placeholderText.length, "user");
+    quill.insertEmbed(index, "image", data.secure_url, "user");
+    quill.setSelection(index + 1, 0, "user");
+  } catch (err) {
+    console.error("Erro ao enviar imagem:", err);
+    quill.deleteText(index, placeholderText.length, "user");
+    alert("Não foi possível enviar a imagem. Confira o Cloud name e o upload preset no topo do app.js.");
+  }
+}
+
 el.imageInput.addEventListener("change", async () => {
   const file = el.imageInput.files[0];
   el.imageInput.value = "";
   if (!file || !state.currentNoteId) return;
   const range = quill.getSelection(true) || { index: quill.getLength() };
-  const placeholderText = "Enviando imagem…";
-  quill.insertText(range.index, placeholderText, "italic", true, "user");
+  await uploadAndInsertImage(file, range.index);
+});
+
+// ============================================================
+// ARRASTAR E SOLTAR IMAGENS
+// ============================================================
+quill.root.addEventListener("dragover", (e) => {
+  if (!Array.from(e.dataTransfer.types || []).includes("Files")) return;
+  e.preventDefault();
+  quill.root.classList.add("is-drag-over");
+});
+quill.root.addEventListener("dragleave", () => {
+  quill.root.classList.remove("is-drag-over");
+});
+quill.root.addEventListener("drop", async (e) => {
+  const files = Array.from(e.dataTransfer.files || []).filter((f) => f.type.startsWith("image/"));
+  if (files.length === 0) return;
+  e.preventDefault();
+  quill.root.classList.remove("is-drag-over");
+  if (!state.currentNoteId) return;
+
+  quill.focus();
+  let index = null;
   try {
-    const path = `images/${state.user.uid}/${Date.now()}_${file.name}`;
-    const ref = storage.ref(path);
-    const snap = await ref.put(file);
-    const url = await snap.ref.getDownloadURL();
-    quill.deleteText(range.index, placeholderText.length, "user");
-    quill.insertEmbed(range.index, "image", url, "user");
-    quill.setSelection(range.index + 1, 0, "user");
+    if (document.caretRangeFromPoint) {
+      const domRange = document.caretRangeFromPoint(e.clientX, e.clientY);
+      const blot = domRange && Quill.find(domRange.startContainer, true);
+      if (blot) index = quill.getIndex(blot) + (domRange.startOffset || 0);
+    }
   } catch (err) {
-    console.error("Erro ao enviar imagem:", err);
-    quill.deleteText(range.index, placeholderText.length, "user");
-    alert("Não foi possível enviar a imagem. Confira se o Storage está ativado no Firebase.");
+    index = null;
+  }
+  if (typeof index !== "number" || Number.isNaN(index)) {
+    const sel = quill.getSelection(true);
+    index = sel ? sel.index : quill.getLength();
+  }
+
+  for (const file of files) {
+    await uploadAndInsertImage(file, index);
+    index = quill.getSelection(true)?.index ?? index + 1;
   }
 });
+
+// ============================================================
+// REDIMENSIONAR IMAGENS (arrastar canto inferior direito)
+// ============================================================
+let resizingImg = null;
+let isDraggingResize = false;
+let resizeDragStart = null;
+
+const resizeHandle = document.createElement("div");
+resizeHandle.className = "image-resize-handle";
+resizeHandle.hidden = true;
+quill.container.appendChild(resizeHandle);
+
+function positionResizeHandle() {
+  if (!resizingImg) return;
+  const imgRect = resizingImg.getBoundingClientRect();
+  const containerRect = quill.container.getBoundingClientRect();
+  resizeHandle.style.left = imgRect.right - containerRect.left - 7 + "px";
+  resizeHandle.style.top = imgRect.bottom - containerRect.top - 7 + "px";
+}
+
+function selectImageForResize(img) {
+  if (resizingImg) resizingImg.classList.remove("is-selected");
+  resizingImg = img;
+  resizingImg.classList.add("is-selected");
+  resizeHandle.hidden = false;
+  positionResizeHandle();
+}
+
+function deselectImage() {
+  if (resizingImg) resizingImg.classList.remove("is-selected");
+  resizingImg = null;
+  resizeHandle.hidden = true;
+}
+
+quill.root.addEventListener("click", (e) => {
+  if (e.target.tagName === "IMG") {
+    selectImageForResize(e.target);
+  } else {
+    deselectImage();
+  }
+});
+
+resizeHandle.addEventListener("mousedown", (e) => {
+  e.preventDefault();
+  isDraggingResize = true;
+  resizeDragStart = { x: e.clientX, width: resizingImg.getBoundingClientRect().width };
+});
+
+document.addEventListener("mousemove", (e) => {
+  if (!isDraggingResize || !resizingImg) return;
+  const delta = e.clientX - resizeDragStart.x;
+  const newWidth = Math.max(40, Math.round(resizeDragStart.width + delta));
+  resizingImg.style.width = newWidth + "px";
+  resizingImg.style.height = "auto";
+  positionResizeHandle();
+});
+
+document.addEventListener("mouseup", () => {
+  if (isDraggingResize) {
+    isDraggingResize = false;
+    debouncedSaveContent();
+  }
+});
+
+quill.root.addEventListener("scroll", positionResizeHandle);
+window.addEventListener("resize", positionResizeHandle);
 
 // ============================================================
 // FIRESTORE — SINCRONIZAÇÃO EM TEMPO REAL
@@ -473,6 +601,7 @@ function openNote(id) {
   state.currentNoteId = id;
   const note = id ? state.notes[id] : null;
   closeMention();
+  if (typeof deselectImage === "function") deselectImage();
 
   if (!note) {
     el.emptyState.hidden = false;
